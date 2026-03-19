@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=65.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prompt-armor"
+version = "0.1.0"
+description = "AI Security Runtime Guard - Detect prompt injection, enforce boundaries, filter PII"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+authors = [
+    {name = "Prompt Armor Team", email = "team@promptarmor.dev"}
+]
+keywords = ["ai", "security", "prompt-injection", "llm", "guardrails", "pii"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Security",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "black",
+    "ruff",
+]
+
+[project.scripts]
+prompt-armor = "prompt_armor.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["prompt_armor*"]
+
+[tool.setuptools.package-data]
+prompt_armor = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+[tool.black]
+line-length = 100
+target-version = ['py38']
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
