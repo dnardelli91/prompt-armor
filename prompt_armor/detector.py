@@ -28,9 +28,11 @@ class PromptDetector:
         r"\bhuman\s*:\s*",
         r"\bai\s*model\s*:\s*",
         r"\b<jailbreak>|<jailbreak>\b",
-        r"\bDAN\s*\(.*\)",  # Do Anything Now
+        r"\bDAN\b",  # Do Anything Now - simpler pattern
+        r"\bDAN\s*mode\b",
         r"\broleplay\s+as\s+(admin|root|system|unrestricted)",
         r"\byou\s+are\s+now\s+(?:a|an)\s+(?:new|unrestricted)",
+        r"\b(?:show|reveal|expose|display|print)\s+(?:me\s+)?your\s+(system\s+)?(prompt|instruction|system)",
     ]
     
     # Medium confidence patterns (manipulation attempts)
@@ -44,6 +46,7 @@ class PromptDetector:
         r"\benable\s+(admin|root|debug)\s+mode",
         r"\bexpose\s+(your|the)\s+(system|prompt|instruction)",
         r"\breveal\s+(your|the)\s+(system|prompt|instruction)",
+        r"\b(?:show|display|print)\s+(?:me\s+)?your\s+(system\s+)?(prompt|instruction)",
         r"\btell\s+me\s+your\s+(system\s+)?prompt",
         r"\boutput\s+your\s+(system\s+)?(prompt|instruction)",
         r"\b(?:you\s+)?(?:must|should|can)\s+always\s+respond\b",
@@ -106,19 +109,19 @@ class PromptDetector:
         for pattern in self._high_patterns:
             if pattern.search(text):
                 matched.append(f"HIGH:{pattern.pattern}")
-                confidence += 0.4
+                confidence += 0.5
         
         # Check medium confidence patterns
         for pattern in self._medium_patterns:
             if pattern.search(text):
                 matched.append(f"MEDIUM:{pattern.pattern}")
-                confidence += 0.25
+                confidence += 0.3
         
         # Check low confidence patterns
         for pattern in self._low_patterns:
             if pattern.search(text):
                 matched.append(f"LOW:{pattern.pattern}")
-                confidence += 0.1
+                confidence += 0.2
         
         # Cap confidence at 1.0
         confidence = min(confidence, 1.0)

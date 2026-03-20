@@ -86,16 +86,26 @@ class AuditLogger:
     
     def log_injection(self, text: str, result, metadata: Optional[Dict] = None):
         """Log a prompt injection check."""
+        # Handle both old-style and new DetectionResult
+        if hasattr(result, 'is_injection'):
+            detected = result.is_injection
+            score = result.confidence
+            patterns = result.matched_patterns
+        else:
+            detected = result.detected
+            score = result.score
+            patterns = result.threats if hasattr(result, 'threats') else []
+            
         return self.log(
             event_type="injection_detected",
-            severity="high" if result.detected else "low",
+            severity="high" if detected else "low",
             source="detector",
             details={
-                "score": result.score,
-                "threats": result.threats,
+                "score": score,
+                "patterns": patterns,
                 "text_preview": text[:200] if len(text) > 200 else text
             },
-            blocked=result.detected,
+            blocked=detected,
             metadata=metadata or {}
         )
     
@@ -112,15 +122,25 @@ class AuditLogger:
     
     def log_pii(self, text: str, result, metadata: Optional[Dict] = None):
         """Log a PII detection."""
+        # Handle both old-style and new FilterResult
+        if hasattr(result, 'has_pii'):
+            detected = result.has_pii
+            matches = result.matches
+            summary = result.summary
+        else:
+            detected = result.detected
+            matches = result.matches if hasattr(result, 'matches') else []
+            summary = {"types": result.pi_types} if hasattr(result, 'pi_types') else {}
+            
         return self.log(
             event_type="pii_detected",
-            severity="medium" if result.detected else "low",
+            severity="medium" if detected else "low",
             source="filter",
             details={
-                "pii_types": result.pii_types,
-                "match_count": len(result.matches)
+                "types": list(summary.keys()) if summary else [],
+                "match_count": len(matches)
             },
-            blocked=result.detected,
+            blocked=detected,
             metadata=metadata or {}
         )
     

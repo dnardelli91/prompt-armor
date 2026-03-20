@@ -1,266 +1,207 @@
 #!/usr/bin/env python3
-"""CLI entry point for Prompt Armor."""
+"""Command-line interface for Prompt Armor."""
 
 import argparse
 import json
 import sys
-import os
 from pathlib import Path
-from typing import Optional
 
-from prompt_armor.detector import PromptDetector, scan_text
-from prompt_armor.guard import BoundaryGuard, load_policy_from_file, create_strict_policy, create_permissive_policy, ActionResult
-from prompt_armor.filter import PIIFilter, scan_text as scan_pii
-from prompt_armor.audit import AuditLogger, EventType, log_injection, log_guard_decision, log_pii_detected
-
-
-def create_parser() -> argparse.ArgumentParser:
-    """Create CLI argument parser."""
-    parser = argparse.ArgumentParser(
-        prog="prompt-armor",
-        description="Prompt Armor - AI Security Runtime Guard",
-        epilog="Detect prompt injection, enforce boundaries, filter PII."
-    )
-    
-    subparsers = parser.add_subparsers(dest="command", help="Commands")
-    
-    # scan command
-    scan_parser = subparsers.add_parser("scan", help="Scan text for prompt injection")
-    scan_parser.add_argument("text", help="Text to scan", nargs="?")
-    scan_parser.add_argument("-f", "--file", help="Read from file")
-    scan_parser.add_argument("-t", "--threshold", type=float, default=0.5,
-                             help="Detection threshold (0-1)")
-    scan_parser.add_argument("--json", action="store_true", help="Output JSON")
-    
-    # guard command
-    guard_parser = subparsers.add_parser("guard", help="Check action against policy")
-    guard_parser.add_argument("action", help="Action to check")
-    guard_parser.add_argument("resource", help="Resource", nargs="?", default="")
-    guard_parser.add_argument("-p", "--policy", help="Policy file (JSON)")
-    guard_parser.add_argument("--strict", action="store_true", help="Use strict policy")
-    guard_parser.add_argument("--permissive", action="store_true", help="Use permissive policy")
-    guard_parser.add_argument("--json", action="store_true", help="Output JSON")
-    
-    # filter command
-    filter_parser = subparsers.add_parser("filter", help="Filter PII from text")
-    filter_parser.add_argument("text", help="Text to filter", nargs="?")
-    filter_parser.add_argument("-f", "--file", help="Read from file")
-    filter_parser.add_argument("-m", "--mask-level", choices=["full", "partial"],
-                               default="partial", help="Masking level")
-    filter_parser.add_argument("--json", action="store_true", help="Output JSON")
-    
-    # audit command
-    audit_parser = subparsers.add_parser("audit", help="Query audit logs")
-    audit_parser.add_argument("--stats", action="store_true", help="Show statistics")
-    audit_parser.add_argument("--type", dest="event_type", help="Filter by event type")
-    audit_parser.add_argument("--severity", help="Filter by severity")
-    audit_parser.add_argument("--limit", type=int, default=10, help="Limit results")
-    audit_parser.add_argument("-l", "--log-file", help="Audit log file")
-    
-    # version
-    parser.add_argument("--version", action="version", version="Prompt Armor v0.1.0")
-    
-    return parser
+from prompt_armor import (
+    Armor, detect_injection, detect_pii, Policy, create_logger
+)
+from prompt_armor.detector import PromptDetector
+from prompt_armor.guard import BoundaryGuard, create_strict_policy
+from prompt_armor.filter import PIIFilter
 
 
-def cmd_scan(args) -> int:
-    """Handle scan command."""
-    # Get text
-    if args.file:
-        with open(args.file, 'r') as f:
-            text = f.read()
-    elif args.text:
-        text = args.text
-    else:
-        print("Error: Provide text or --file", file=sys.stderr)
+def cmd_check(args):
+    """Run security checks on input text."""
+    text = args.text or sys.stdin.read().strip()
+    
+    if not text:
+        print("Error: No input text provided", file=sys.stderr)
         return 1
     
-    # Detect
+    # Initialize armor with optional audit log
+    logger = create_logger(args.log) if args.log else None
+    
+    policy = create_strict_policy() if args.restrictive else None
+    
+    armor = Armor(
+        injection_threshold=args.threshold,
+        policy=policy,
+        log_path=args.log
+    )
+    
+    if args.mode == "injection":
+        result = armor.check_input(text)
+        output = {
+            "detected": result.is_injection,
+            "confidence": result.confidence,
+            "patterns": result.matched_patterns,
+            "message": result.message
+        }
+    elif args.mode == "pii":
+        result = armor.check_output(text)
+        output = {
+            "detected": result.has_pii,
+            "summary": result.summary,
+            "matches": [{"type": m.pii_type, "value": m.masked} for m in result.matches[:10]]
+        }
+    elif args.mode == "sanitize":
+        result = armor.sanitize(text)
+        output = {
+            "detected": result.has_pii,
+            "filtered": result.filtered_text
+        }
+    else:  # full
+        result = armor.full_check(text)
+        output = result
+    
+    print(json.dumps(output, indent=2))
+    return 0
+
+
+def cmd_detect(args):
+    """Run only injection detection."""
+    text = args.text or sys.stdin.read().strip()
+    
+    if not text:
+        print("Error: No input text provided", file=sys.stderr)
+        return 1
+    
     detector = PromptDetector(threshold=args.threshold)
     result = detector.detect(text)
     
-    # Setup logging
-    log_file = os.environ.get("PROMPT_ARMOR_AUDIT_LOG")
-    logger = AuditLogger(log_file=log_file) if log_file else None
+    output = {
+        "detected": result.is_injection,
+        "confidence": result.confidence,
+        "patterns": result.matched_patterns,
+        "message": result.message
+    }
     
-    if logger:
-        log_injection(
-            text_preview=text[:200],
-            confidence=result.confidence,
-            patterns=result.matched_patterns,
-            logger=logger
-        )
-    
-    # Output
-    if args.json:
-        output = {
-            "is_injection": result.is_injection,
-            "confidence": result.confidence,
-            "matched_patterns": result.matched_patterns,
-            "message": result.message
-        }
-        print(json.dumps(output, indent=2))
-    else:
-        status = "🚨 BLOCKED" if result.is_injection else "✅ CLEAN"
-        print(f"{status} - {result.message}")
-        if result.matched_patterns:
-            print(f"Patterns: {', '.join(result.matched_patterns[:5])}")
-    
+    print(json.dumps(output, indent=2))
     return 0 if not result.is_injection else 1
 
 
-def cmd_guard(args) -> int:
-    """Handle guard command."""
-    # Load policy
-    if args.policy:
-        policy = load_policy_from_file(args.policy)
-    elif args.strict:
-        policy = create_strict_policy()
-    elif args.permissive:
-        policy = create_permissive_policy()
-    else:
-        policy = create_strict_policy()
+def cmd_guard(args):
+    """Check tool/command access against policy."""
+    # Get tool from either positional or option
+    tool_name = getattr(args, 'tool', None) or getattr(args, 'tool_opt', None)
     
-    guard = BoundaryGuard(policy)
-    
-    # Check action
-    result = guard.check_action(args.action, args.resource)
-    
-    # Setup logging
-    log_file = os.environ.get("PROMPT_ARMOR_AUDIT_LOG")
-    logger = AuditLogger(log_file=log_file) if log_file else None
-    
-    if logger:
-        log_guard_decision(
-            action=args.action,
-            resource=args.resource,
-            result=result.result.value,
-            reason=result.reason,
-            logger=logger
-        )
-    
-    # Output
-    if args.json:
-        output = {
-            "result": result.result.value,
-            "message": result.message,
-            "reason": result.reason,
-            "policy_matched": result.policy_matched
-        }
-        print(json.dumps(output, indent=2))
-    else:
-        icon = "⛔" if result.result == ActionResult.FORBIDDEN else "✅"
-        print(f"{icon} {result.result.value.upper()} - {result.message}")
-    
-    return 0 if result.result == ActionResult.ALLOWED else 1
-
-
-def cmd_filter(args) -> int:
-    """Handle filter command."""
-    # Get text
-    if args.file:
-        with open(args.file, 'r') as f:
-            text = f.read()
-    elif args.text:
-        text = args.text
-    else:
-        print("Error: Provide text or --file", file=sys.stderr)
+    if not tool_name and not args.command:
+        print("Error: Provide tool name or --command", file=sys.stderr)
         return 1
     
-    # Filter
-    pii_filter = PIIFilter(mask_level=args.mask_level)
-    result = pii_filter.detect(text)
+    policy = create_strict_policy() if args.restrictive else Policy()
+    guard = BoundaryGuard(policy=policy)
     
-    # Setup logging
-    log_file = os.environ.get("PROMPT_ARMOR_AUDIT_LOG")
-    logger = AuditLogger(log_file=log_file) if log_file else None
-    
-    if logger and result.has_pii:
-        for match in result.matches:
-            log_pii_detected(
-                pii_type=match.pii_type,
-                original=match.value,
-                masked=match.masked,
-                logger=logger
-            )
-    
-    # Output
-    if args.json:
+    if tool_name:
+        result = guard.check_action(tool_name)
         output = {
-            "has_pii": result.has_pii,
-            "summary": result.summary,
-            "matches": [
-                {
-                    "type": m.pii_type,
-                    "masked": m.masked
-                }
-                for m in result.matches
-            ],
-            "filtered_text": result.filtered_text
+            "action": tool_name,
+            "result": result.result.value,
+            "message": result.message
         }
-        print(json.dumps(output, indent=2))
     else:
-        if result.has_pii:
-            print("⚠️  PII DETECTED")
-            for pii_type, count in result.summary.items():
-                print(f"  - {pii_type}: {count}")
-            print("\nFiltered text:")
-            print(result.filtered_text)
-        else:
-            print("✅ No PII detected")
+        parts = args.command.split()
+        action = parts[0] if parts else ""
+        resource = parts[1] if len(parts) > 1 else ""
+        result = guard.check_action(action, resource)
+        output = {
+            "result": result.result.value,
+            "message": result.message
+        }
     
-    return 0 if not result.has_pii else 1
+    print(json.dumps(output, indent=2))
+    return 0 if result.result.value == "allowed" else 1
 
 
-def cmd_audit(args) -> int:
-    """Handle audit command."""
-    log_file = args.log_file or "audit.jsonl"
-    logger = AuditLogger(log_file=log_file)
+def cmd_audit(args):
+    """View audit logs."""
+    logger = create_logger(args.log)
     
-    if args.stats:
-        stats = logger.get_stats()
-        print(json.dumps(stats, indent=2))
+    if args.summary:
+        print(json.dumps(logger.summary(), indent=2))
     else:
-        event_type = EventType(args.event_type) if args.event_type else None
-        events = logger.query(
-            event_type=event_type,
-            severity=args.severity,
-            limit=args.limit
+        events = logger.get_events(
+            event_type=args.type,
+            severity=args.severity
         )
-        
-        if not events:
-            print("No events found")
-            return 0
-        
         for event in events:
-            print(f"[{event.timestamp}] {event.severity} - {event.event_type}")
-            print(f"  {json.dumps(event.details)}")
-            print()
+            print(json.dumps(event.__dict__, default=str))
     
     return 0
 
 
-def main() -> int:
+# Map function names to command names for workaround
+_FUNC_TO_CMD = {
+    'cmd_check': 'check',
+    'cmd_detect': 'detect', 
+    'cmd_guard': 'guard',
+    'cmd_audit': 'audit'
+}
+
+
+def main():
     """Main entry point."""
-    parser = create_parser()
+    parser = argparse.ArgumentParser(
+        description="Prompt Armor - Runtime security layer for AI agents"
+    )
+    
+    # Global options (must be added before subparsers for proper parsing)
+    parser.add_argument("-l", "--log", help="Audit log path")
+    parser.add_argument("-t", "--threshold", type=float, default=0.3,
+                        help="Detection threshold (default: 0.5)")
+    
+    # Subparsers
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+    
+    # check command
+    check_parser = subparsers.add_parser("check", help="Run security checks")
+    check_parser.add_argument("text", nargs="?", help="Text to check")
+    check_parser.add_argument("-m", "--mode", 
+                              choices=["injection", "pii", "sanitize", "full"],
+                              default="full", help="Check mode")
+    check_parser.add_argument("-r", "--restrictive", action="store_true",
+                              help="Use restrictive policy")
+    check_parser.set_defaults(func=cmd_check)
+    
+    # detect command
+    detect_parser = subparsers.add_parser("detect", help="Detect injection")
+    detect_parser.add_argument("text", nargs="?", help="Text to check")
+    detect_parser.set_defaults(func=cmd_detect)
+    
+    # guard command
+    guard_parser = subparsers.add_parser("guard", help="Check access policy")
+    guard_parser.add_argument("tool", nargs="?", help="Tool name")
+    guard_parser.add_argument("-T", "--tool", dest="tool_opt", help="Tool name (alt)")
+    guard_parser.add_argument("-c", "--command", help="Command string")
+    guard_parser.add_argument("-r", "--restrictive", action="store_true",
+                              help="Use restrictive policy")
+    guard_parser.set_defaults(func=cmd_guard)
+    
+    # audit command  
+    audit_parser = subparsers.add_parser("audit", help="View audit logs")
+    audit_parser.add_argument("-t", "--type", help="Filter by event type")
+    audit_parser.add_argument("-s", "--severity", help="Filter by severity")
+    audit_parser.add_argument("--summary", action="store_true", help="Show summary")
+    audit_parser.set_defaults(func=cmd_audit)
+    
     args = parser.parse_args()
     
-    if not args.command:
+    # Workaround for argparse bug: command may be None even when subparser matched
+    # If func is set but command is None, infer command from func name
+    if args.command is None:
+        func_name = getattr(args, 'func', None).__name__ if hasattr(args, 'func') and args.func else None
+        if func_name and func_name in _FUNC_TO_CMD:
+            args.command = _FUNC_TO_CMD[func_name]
+    
+    if args.command is None:
         parser.print_help()
-        return 0
+        return 1
     
-    commands = {
-        "scan": cmd_scan,
-        "guard": cmd_guard,
-        "filter": cmd_filter,
-        "audit": cmd_audit
-    }
-    
-    if args.command in commands:
-        return commands[args.command](args)
-    
-    print(f"Unknown command: {args.command}", file=sys.stderr)
-    return 1
+    return args.func(args)
 
 
 if __name__ == "__main__":
